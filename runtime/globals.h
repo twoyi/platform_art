@@ -162,7 +162,7 @@ static constexpr TraceClockSource kDefaultTraceClockSource = TraceClockSource::k
 static constexpr TraceClockSource kDefaultTraceClockSource = TraceClockSource::kWall;
 #endif
 
-static constexpr bool kDefaultMustRelocate = true;
+static constexpr bool kDefaultMustRelocate = false;
 
 static constexpr bool kArm32QuickCodeUseSoftFloat = false;
 
