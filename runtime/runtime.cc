@@ -489,8 +489,31 @@ struct AbortState {
   }
 };
 
+static void ReportTwoyiV5Abort(const char* message) {
+  const char* enabled = getenv("TWOYI_INIT_V5_SYSTEM_SERVER_PROBE");
+  if (enabled == nullptr || strcmp(enabled, "1") != 0) {
+    return;
+  }
+
+  char marker[1536];
+  int prefix = snprintf(marker, sizeof(marker), "V5_ART_ABORT message=");
+  if (prefix <= 0) return;
+  size_t length = static_cast<size_t>(prefix);
+  if (length >= sizeof(marker) - 2U) return;
+  if (message == nullptr) message = "<null>";
+  for (const unsigned char* cursor =
+           reinterpret_cast<const unsigned char*>(message);
+       *cursor != '\0' && length < sizeof(marker) - 2U; ++cursor) {
+    marker[length++] = (*cursor == '\n' || *cursor == '\r')
+        ? ' ' : static_cast<char>(*cursor);
+  }
+  marker[length++] = '\n';
+  (void)syscall(__NR_write, 199, marker, length);
+}
+
 void Runtime::Abort(const char* msg) {
   auto old_value = gAborting.fetch_add(1);  // set before taking any locks
+  ReportTwoyiV5Abort(msg);
 
 #ifdef ART_TARGET_ANDROID
   if (old_value == 0) {
