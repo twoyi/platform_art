@@ -17,6 +17,7 @@
 #include "runtime.h"
 
 // sys/mount.h has to come before linux/fs.h due to redefinition of MS_RDONLY, MS_BIND, etc
+#include <errno.h>
 #include <sys/mount.h>
 #ifdef __linux__
 #include <linux/fs.h>
@@ -489,21 +490,88 @@ struct AbortState {
   }
 };
 
-static void ReportTwoyiV5Abort(const char* message) {
+struct TwoyiArtAbortBuffers {
+  char marker[1536];
+  char message[768];
+};
+
+__attribute__((noinline)) static void ReportTwoyiV5Abort(
+    const char* message) {
   const char* enabled = getenv("TWOYI_INIT_V5_SYSTEM_SERVER_PROBE");
-  if (enabled == nullptr || strcmp(enabled, "1") != 0) {
+  const char* runtime = getenv("TWOYI_RUNTIME_MODE");
+  const bool r0 = runtime != nullptr && strcmp(runtime, "appzygote") == 0;
+  if (!r0 && (enabled == nullptr || strcmp(enabled, "1") != 0)) {
     return;
   }
 
-  char marker[1536];
-  int prefix = snprintf(marker, sizeof(marker), "V5_ART_ABORT message=");
+  auto* buffers = static_cast<TwoyiArtAbortBuffers*>(
+      calloc(1U, sizeof(TwoyiArtAbortBuffers)));
+  if (buffers == nullptr) {
+    if (r0) {
+      static constexpr char kFailure[] =
+          "R0_PROVIDER_BLOCKER process=unknown service=unknown "
+          "action=unknown operation=art-abort path=allocation "
+          "provider=art errno=12 hostUid=unknown hostGid=unknown "
+          "guestUid=unknown guestGid=unknown groups= "
+          "generation=unknown\n";
+      (void)syscall(__NR_write, 199, kFailure, sizeof(kFailure) - 1U);
+    } else {
+      static constexpr char kFailure[] =
+          "V5_ART_ABORT message=allocation-failure\n";
+      (void)syscall(__NR_write, 199, kFailure, sizeof(kFailure) - 1U);
+    }
+    return;
+  }
+  char* marker = buffers->marker;
+  constexpr size_t kMarkerSize = sizeof(buffers->marker);
+  if (r0) {
+    size_t message_length = 0U;
+    if (message == nullptr) message = "<null>";
+    for (const unsigned char* cursor =
+             reinterpret_cast<const unsigned char*>(message);
+         *cursor != '\0' && message_length < sizeof(buffers->message) - 1U;
+         ++cursor) {
+      buffers->message[message_length++] =
+          (*cursor == ' ' || *cursor == '\t' || *cursor == '\n' ||
+           *cursor == '\r') ? '_' : static_cast<char>(*cursor);
+    }
+    buffers->message[message_length] = '\0';
+    const char* service = getenv("TWOYI_GUEST_SERVICE");
+    const char* context = getenv("TWOYI_GUEST_CONTEXT");
+    const char* groups = getenv("TWOYI_GUEST_GROUPS");
+    const char* guest_uid = getenv("TWOYI_GUEST_UID");
+    const char* guest_gid = getenv("TWOYI_GUEST_GID");
+    const char* name_space = getenv("TWOYI_RUNTIME_NAMESPACE");
+    const int length = snprintf(
+        marker, kMarkerSize,
+        "R0_PROVIDER_BLOCKER process=%s service=%s action=%s "
+        "operation=art-abort path=%s provider=art errno=%d "
+        "hostUid=%ld hostGid=%ld guestUid=%s guestGid=%s "
+        "groups=%s generation=%s\n",
+        service != nullptr ? service : "unknown",
+        service != nullptr ? service : "unknown",
+        context != nullptr ? context : "art-runtime",
+        buffers->message, EIO, syscall(__NR_getuid), syscall(__NR_getgid),
+        guest_uid != nullptr ? guest_uid : "unknown",
+        guest_gid != nullptr ? guest_gid : "unknown",
+        groups != nullptr ? groups : "",
+        name_space != nullptr ? name_space : "unknown");
+    if (length > 0) {
+      const size_t bounded = static_cast<size_t>(length) < kMarkerSize
+          ? static_cast<size_t>(length) : kMarkerSize - 1U;
+      (void)syscall(__NR_write, 199, marker, bounded);
+    }
+    return;
+  }
+
+  int prefix = snprintf(marker, kMarkerSize, "V5_ART_ABORT message=");
   if (prefix <= 0) return;
   size_t length = static_cast<size_t>(prefix);
-  if (length >= sizeof(marker) - 2U) return;
+  if (length >= kMarkerSize - 2U) return;
   if (message == nullptr) message = "<null>";
   for (const unsigned char* cursor =
            reinterpret_cast<const unsigned char*>(message);
-       *cursor != '\0' && length < sizeof(marker) - 2U; ++cursor) {
+       *cursor != '\0' && length < kMarkerSize - 2U; ++cursor) {
     marker[length++] = (*cursor == '\n' || *cursor == '\r')
         ? ' ' : static_cast<char>(*cursor);
   }

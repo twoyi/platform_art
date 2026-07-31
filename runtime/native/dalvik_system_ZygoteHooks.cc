@@ -71,14 +71,33 @@ static int64_t TwoyiV5MonotonicMilliseconds() {
 }
 
 [[noreturn]] static void TwoyiV5AbortThreadQuiesce(const char* detail, int error) {
-  char marker[384];
+  char marker[1536];
   if (error <= 0 || error > 4095) {
     error = EIO;
   }
-  const int length = snprintf(
-      marker, sizeof(marker),
-      "V5_SYSTEM_SERVER_ABORT operation=thread-quiesce detail=%s errno=%d\n",
-      detail, error);
+  const char* runtime = getenv("TWOYI_RUNTIME_MODE");
+  const bool r0 = runtime != nullptr && strcmp(runtime, "appzygote") == 0;
+  const char* service = getenv("TWOYI_GUEST_SERVICE");
+  const char* context = getenv("TWOYI_GUEST_CONTEXT");
+  const char* groups = getenv("TWOYI_GUEST_GROUPS");
+  const char* name_space = getenv("TWOYI_RUNTIME_NAMESPACE");
+  const int length = r0
+      ? snprintf(marker, sizeof(marker),
+                 "R0_PROVIDER_BLOCKER process=%s service=%s action=%s "
+                 "operation=thread-quiesce path=%s provider=proc errno=%d "
+                 "hostUid=%ld hostGid=%ld guestUid=%u guestGid=%u "
+                 "groups=%s generation=%s\n",
+                 service != nullptr ? service : "zygote",
+                 service != nullptr ? service : "zygote",
+                 context != nullptr ? context : "zygote-prefork",
+                 detail, error, syscall(__NR_getuid), syscall(__NR_getgid),
+                 static_cast<unsigned int>(getuid()),
+                 static_cast<unsigned int>(getgid()),
+                 groups != nullptr ? groups : "",
+                 name_space != nullptr ? name_space : "unknown")
+      : snprintf(marker, sizeof(marker),
+                 "V5_SYSTEM_SERVER_ABORT operation=thread-quiesce "
+                 "detail=%s errno=%d\n", detail, error);
   if (length > 0) {
     size_t offset = 0;
     const size_t bounded = static_cast<size_t>(length) < sizeof(marker)
