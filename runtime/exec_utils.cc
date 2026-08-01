@@ -18,8 +18,13 @@
 
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <unistd.h>
 #include <string>
 #include <vector>
+
+#if defined(__ANDROID__) && defined(__aarch64__)
+#include <twoyi_exec.h>
+#endif
 
 #include "android-base/stringprintf.h"
 #include "android-base/strings.h"
@@ -45,8 +50,25 @@ int ExecAndReturnCode(std::vector<std::string>& arg_vector, std::string* error_m
   }
   args.push_back(nullptr);
 
+#if defined(__ANDROID__) && defined(__aarch64__)
+  struct twoyi_data_vfs_exec_clients exec_clients = {-1, -1};
+  if (__twoyi_data_vfs_prepare_exec_clients(
+          geteuid(), getegid(), &exec_clients) != 0) {
+    const int saved_errno = errno;
+    *error_msg = StringPrintf(
+        "Failed to prepare B1 clients for execv(%s): %s",
+        command_line.c_str(), strerror(saved_errno));
+    return -1;
+  }
+#endif
+
   // fork and exec
   pid_t pid = fork();
+#if defined(__ANDROID__) && defined(__aarch64__)
+  if (pid != 0) {
+    __twoyi_data_vfs_discard_exec_clients(&exec_clients);
+  }
+#endif
   if (pid == 0) {
     // no allocation allowed between fork and exec
 
@@ -56,6 +78,14 @@ int ExecAndReturnCode(std::vector<std::string>& arg_vector, std::string* error_m
     // (b/30160149): protect subprocesses from modifications to LD_LIBRARY_PATH, etc.
     // Use the snapshot of the environment from the time the runtime was created.
     char** envp = (Runtime::Current() == nullptr) ? nullptr : Runtime::Current()->GetEnvSnapshot();
+#if defined(__ANDROID__) && defined(__aarch64__)
+    // Last operation before exec: replacing 192/195 makes both request
+    // streams pristine without touching malloc or inherited B1 mutex state.
+    if (__twoyi_data_vfs_install_exec_clients_after_fork(&exec_clients) != 0) {
+      PLOG(ERROR) << "Failed to install B1 clients for execve(" << command_line << ")";
+      _exit(1);
+    }
+#endif
     if (envp == nullptr) {
       execv(program, &args[0]);
     } else {
