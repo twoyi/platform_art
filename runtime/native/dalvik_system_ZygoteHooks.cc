@@ -16,16 +16,7 @@
 
 #include "dalvik_system_ZygoteHooks.h"
 
-#include <dirent.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <sys/syscall.h>
-#include <time.h>
-#include <unistd.h>
 
 #include "android-base/stringprintf.h"
 
@@ -57,110 +48,8 @@ namespace art {
 // Set to true to always determine the non-debuggable classes even if we would not allow a debugger
 // to actually attach.
 static constexpr bool kAlwaysCollectNonDebuggableClasses = kIsDebugBuild;
-static constexpr int kTwoyiV5ReportFd = 199;
-static constexpr int64_t kTwoyiV5ThreadQuiesceTimeoutMs = 10000;
 
 using android::base::StringPrintf;
-
-static int64_t TwoyiV5MonotonicMilliseconds() {
-  timespec now{};
-  if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
-    return -1;
-  }
-  return static_cast<int64_t>(now.tv_sec) * 1000 + now.tv_nsec / 1000000;
-}
-
-[[noreturn]] static void TwoyiV5AbortThreadQuiesce(const char* detail, int error) {
-  char marker[1536];
-  if (error <= 0 || error > 4095) {
-    error = EIO;
-  }
-  const char* runtime = getenv("TWOYI_RUNTIME_MODE");
-  const bool r0 = runtime != nullptr && strcmp(runtime, "appzygote") == 0;
-  const char* service = getenv("TWOYI_GUEST_SERVICE");
-  const char* context = getenv("TWOYI_GUEST_CONTEXT");
-  const char* groups = getenv("TWOYI_GUEST_GROUPS");
-  const char* name_space = getenv("TWOYI_RUNTIME_NAMESPACE");
-  const int length = r0
-      ? snprintf(marker, sizeof(marker),
-                 "R0_PROVIDER_BLOCKER process=%s service=%s action=%s "
-                 "operation=thread-quiesce path=%s provider=proc errno=%d "
-                 "hostUid=%ld hostGid=%ld guestUid=%u guestGid=%u "
-                 "groups=%s generation=%s\n",
-                 service != nullptr ? service : "zygote",
-                 service != nullptr ? service : "zygote",
-                 context != nullptr ? context : "zygote-prefork",
-                 detail, error, syscall(__NR_getuid), syscall(__NR_getgid),
-                 static_cast<unsigned int>(getuid()),
-                 static_cast<unsigned int>(getgid()),
-                 groups != nullptr ? groups : "",
-                 name_space != nullptr ? name_space : "unknown")
-      : snprintf(marker, sizeof(marker),
-                 "V5_SYSTEM_SERVER_ABORT operation=thread-quiesce "
-                 "detail=%s errno=%d\n", detail, error);
-  if (length > 0) {
-    size_t offset = 0;
-    const size_t bounded = static_cast<size_t>(length) < sizeof(marker)
-        ? static_cast<size_t>(length) : sizeof(marker) - 1;
-    while (offset < bounded) {
-      const ssize_t count = static_cast<ssize_t>(
-          syscall(__NR_write, kTwoyiV5ReportFd, marker + offset,
-                  bounded - offset));
-      if (count > 0) {
-        offset += static_cast<size_t>(count);
-      } else if (count < 0 && errno == EINTR) {
-        continue;
-      } else {
-        break;
-      }
-    }
-  }
-  _exit(124);
-}
-
-static int TwoyiV5KernelThreadCount() {
-  const int fd = static_cast<int>(
-      syscall(__NR_openat, AT_FDCWD, "/proc/self/task",
-              O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0));
-  if (fd < 0) {
-    return -1;
-  }
-
-  int count = 0;
-  alignas(struct dirent) char buffer[1024];
-  for (;;) {
-    const ssize_t bytes = static_cast<ssize_t>(
-        syscall(__NR_getdents64, fd, buffer, sizeof(buffer)));
-    if (bytes == 0) {
-      break;
-    }
-    if (bytes < 0) {
-      const int saved_errno = errno;
-      (void)syscall(__NR_close, fd);
-      errno = saved_errno;
-      return -1;
-    }
-    size_t offset = 0;
-    while (offset < static_cast<size_t>(bytes)) {
-      const dirent* entry = reinterpret_cast<const dirent*>(buffer + offset);
-      if (entry->d_reclen == 0 ||
-          offset + entry->d_reclen > static_cast<size_t>(bytes)) {
-        (void)syscall(__NR_close, fd);
-        errno = EPROTO;
-        return -1;
-      }
-      if (strcmp(entry->d_name, ".") != 0 &&
-          strcmp(entry->d_name, "..") != 0) {
-        ++count;
-      }
-      offset += entry->d_reclen;
-    }
-  }
-  if (syscall(__NR_close, fd) != 0) {
-    return -1;
-  }
-  return count;
-}
 
 static void EnableDebugger() {
 #if defined(__linux__)
@@ -437,32 +326,6 @@ static void ZygoteHooks_nativePostForkChild(JNIEnv* env,
   }
 }
 
-static void ZygoteHooks_nativeTwoyiV5WaitUntilSingleThreaded(
-    JNIEnv*, jclass) {
-  const int64_t started = TwoyiV5MonotonicMilliseconds();
-  if (started < 0) {
-    TwoyiV5AbortThreadQuiesce("clock", errno);
-  }
-  for (;;) {
-    const int count = TwoyiV5KernelThreadCount();
-    if (count == 1) {
-      return;
-    }
-    if (count < 0) {
-      TwoyiV5AbortThreadQuiesce("self-task-snapshot", errno);
-    }
-    const int64_t now = TwoyiV5MonotonicMilliseconds();
-    if (now < 0) {
-      TwoyiV5AbortThreadQuiesce("clock", errno);
-    }
-    if (now - started >= kTwoyiV5ThreadQuiesceTimeoutMs) {
-      TwoyiV5AbortThreadQuiesce("timeout", ETIMEDOUT);
-    }
-    const timespec pause = {0, 1000 * 1000};
-    (void)nanosleep(&pause, nullptr);
-  }
-}
-
 static void ZygoteHooks_startZygoteNoThreadCreation(JNIEnv* env ATTRIBUTE_UNUSED,
                                                     jclass klass ATTRIBUTE_UNUSED) {
   Runtime::Current()->SetZygoteNoThreadSection(true);
@@ -476,7 +339,6 @@ static void ZygoteHooks_stopZygoteNoThreadCreation(JNIEnv* env ATTRIBUTE_UNUSED,
 static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(ZygoteHooks, nativePreFork, "()J"),
   NATIVE_METHOD(ZygoteHooks, nativePostForkChild, "(JIZLjava/lang/String;)V"),
-  NATIVE_METHOD(ZygoteHooks, nativeTwoyiV5WaitUntilSingleThreaded, "()V"),
   NATIVE_METHOD(ZygoteHooks, startZygoteNoThreadCreation, "()V"),
   NATIVE_METHOD(ZygoteHooks, stopZygoteNoThreadCreation, "()V"),
 };
