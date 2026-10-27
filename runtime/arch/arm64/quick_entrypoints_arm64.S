@@ -1062,7 +1062,7 @@ END art_quick_invoke_static_stub
  *                                    Thread *self)                x5
  */
 ENTRY art_quick_osr_stub
-SAVE_SIZE=15*8   // x3, x4, x19, x20, x21, x22, x23, x24, x25, x26, x27, x28, SP, LR, FP saved.
+SAVE_SIZE=23*8   // x3, x4, x19, x20, x21, x22, x23, x24, x25, x26, x27, x28, SP, LR, FP, d8-d15 saved.
     mov x9, sp                             // Save stack pointer.
     .cfi_register sp,x9
 
@@ -1070,6 +1070,10 @@ SAVE_SIZE=15*8   // x3, x4, x19, x20, x21, x22, x23, x24, x25, x26, x27, x28, SP
     and x10, x10, # ~0xf                   // Enforce 16 byte stack alignment.
     mov sp, x10                            // Set new SP.
 
+    stp d14, d15, [sp, #168]               // Save callee-save FP registers.
+    stp d12, d13, [sp, #152]
+    stp d10, d11, [sp, #136]
+    stp d8, d9, [sp, #120]
     str x28, [sp, #112]
     stp x26, x27, [sp, #96]
     stp x24, x25, [sp, #80]
@@ -1094,6 +1098,10 @@ SAVE_SIZE=15*8   // x3, x4, x19, x20, x21, x22, x23, x24, x25, x26, x27, x28, SP
     ldp x24, x25, [sp, #80]
     ldp x22, x23, [sp, #64]
     ldp x20, x21, [sp, #48]
+    ldp d8, d9, [sp, #120]                 // Restore callee-save FP registers.
+    ldp d10, d11, [sp, #136]
+    ldp d12, d13, [sp, #152]
+    ldp d14, d15, [sp, #168]
 
     // Store result (w0/x0/s0/d0) appropriately, depending on resultType.
     ldrb w10, [x4]
